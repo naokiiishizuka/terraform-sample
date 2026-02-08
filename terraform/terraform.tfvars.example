@@ -1,0 +1,26 @@
+# Copy this file to terraform.tfvars and adjust values as needed
+aws_region   = "ap-northeast-1"
+project_name = "terraform-sample"
+
+# Networking overrides (optional)
+# private_subnet_cidrs = {
+#   primary   = "10.0.10.0/24"
+#   secondary = "10.0.20.0/24"
+# }
+
+# Database credentials (do not commit secrets)
+db_username = "appuser"
+db_password = "change-me"
+
+# Session Manager helper EC2
+ssm_instance_type = "t3.micro"
+# ssm_ami_id = "ami-xxxxxxxx" # Uncomment to pin a specific AMI
+
+# App Runner secret environment variable name
+app_runner_secret_env_name = "DB_CREDENTIALS_SECRET_ARN"
+
+# Global tags
+tags = {
+  Environment = "dev"
+  Owner       = "you"
+}
