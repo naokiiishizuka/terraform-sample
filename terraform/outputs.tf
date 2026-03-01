@@ -23,6 +23,11 @@ output "app_runner_secret_arn" {
   value       = local.db_master_secret_arn
 }
 
+output "app_runner_ecr_repository_url" {
+  description = "ECR repository URL hosting the App Runner container image"
+  value       = aws_ecr_repository.app_runner.repository_url
+}
+
 output "kms_key_arn" {
   description = "KMS key ARN securing the Secrets Manager secret"
   value       = aws_kms_key.secrets.arn

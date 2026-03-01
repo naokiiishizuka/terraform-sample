@@ -77,6 +77,14 @@
 6. **動作確認**  
    App Runner 経由でアプリと DB が疎通できること、SSM EC2 に Session Manager で接続できることなどを確認し、必要に応じて Terraform state をバックアップします。
 
+### App Runner 用 ECR イメージの更新（オプション）
+Terraform は常に `app_runner_ecr_repository_url` で示すリポジトリを作成しますが、デフォルト (`use_managed_ecr = false`) では `app_runner_image_identifier` で指定した public ECR イメージを参照するだけです。自前のリポジトリから起動したい場合は `use_managed_ecr = true` に切り替え、App Runner を再作成してから以下の手順でイメージをプッシュします。
+
+1. `terraform output app_runner_ecr_repository_url` でリポジトリ URL を確認します（例: `123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/terraform-sample-app`）。
+2. ローカルでログイン: `aws ecr get-login-password --region ap-northeast-1 | docker login --username AWS --password-stdin <repository_url>`。
+3. アプリコンテナをビルドしてタグ付け: `docker build -t <repository_url>:<tag> .`。
+4. `docker push <repository_url>:<tag>` でプッシュすると、App Runner が `app_runner_image_tag` で指定したタグ（デフォルト latest）を pull して再デプロイできます。
+
 ---
 
 ## SSM 経由で RDS に接続する手順

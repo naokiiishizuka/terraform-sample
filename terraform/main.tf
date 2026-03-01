@@ -20,6 +20,24 @@ locals {
   ssm_ami_id = coalesce(var.ssm_ami_id, data.aws_ssm_parameter.al2023_ami.value)
 }
 
+resource "aws_ecr_repository" "app_runner" {
+  name                 = "${local.name_prefix}-app"
+  image_tag_mutability = "MUTABLE"
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  encryption_configuration {
+    encryption_type = "KMS"
+    kms_key         = aws_kms_key.secrets.arn
+  }
+
+  tags = merge(local.tags, {
+    Name = "${local.name_prefix}-app-repo"
+  })
+}
+
 resource "aws_vpc" "main" {
   cidr_block           = var.vpc_cidr_block
   enable_dns_support   = true
@@ -154,23 +172,23 @@ resource "aws_db_subnet_group" "rds" {
 }
 
 resource "aws_db_instance" "postgres" {
-  identifier              = "${local.name_prefix}-postgres"
-  allocated_storage       = var.db_allocated_storage
-  engine                  = "postgres"
-  engine_version          = var.db_engine_version
-  instance_class          = var.db_instance_class
-  db_name                 = var.db_name
-  username                = var.db_username
-  manage_master_user_password = true
+  identifier                    = "${local.name_prefix}-postgres"
+  allocated_storage             = var.db_allocated_storage
+  engine                        = "postgres"
+  engine_version                = var.db_engine_version
+  instance_class                = var.db_instance_class
+  db_name                       = var.db_name
+  username                      = var.db_username
+  manage_master_user_password   = true
   master_user_secret_kms_key_id = aws_kms_key.secrets.arn
-  port                    = 5432
-  vpc_security_group_ids  = [aws_security_group.rds.id]
-  db_subnet_group_name    = aws_db_subnet_group.rds.name
-  multi_az                = true
-  storage_encrypted       = true
-  publicly_accessible     = false
-  backup_retention_period = 1
-  skip_final_snapshot     = true
+  port                          = 5432
+  vpc_security_group_ids        = [aws_security_group.rds.id]
+  db_subnet_group_name          = aws_db_subnet_group.rds.name
+  multi_az                      = true
+  storage_encrypted             = true
+  publicly_accessible           = false
+  backup_retention_period       = 1
+  skip_final_snapshot           = true
 
   tags = merge(local.tags, {
     Name = "${local.name_prefix}-postgres"
@@ -178,7 +196,12 @@ resource "aws_db_instance" "postgres" {
 }
 
 locals {
-  db_master_secret_arn = aws_db_instance.postgres.master_user_secret[0].secret_arn
+  db_master_secret_arn             = aws_db_instance.postgres.master_user_secret[0].secret_arn
+  use_managed_ecr                  = var.use_managed_ecr
+  managed_ecr_image_identifier     = "${aws_ecr_repository.app_runner.repository_url}:${var.app_runner_image_tag}"
+  app_runner_image_identifier      = local.use_managed_ecr ? local.managed_ecr_image_identifier : var.app_runner_image_identifier
+  app_runner_image_repository_type = local.use_managed_ecr ? "ECR" : var.app_runner_image_repository_type
+  app_runner_auth_role_arn         = local.use_managed_ecr ? aws_iam_role.apprunner_ecr[0].arn : null
 }
 
 resource "aws_iam_role" "ssm_instance" {
@@ -326,6 +349,49 @@ resource "aws_iam_role_policy" "apprunner_secrets" {
   policy = data.aws_iam_policy_document.apprunner_secrets.json
 }
 
+data "aws_iam_policy_document" "apprunner_ecr_access" {
+  count = var.use_managed_ecr ? 1 : 0
+  statement {
+    actions   = ["ecr:GetAuthorizationToken"]
+    resources = ["*"]
+  }
+
+  statement {
+    actions = [
+      "ecr:BatchGetImage",
+      "ecr:GetDownloadUrlForLayer",
+      "ecr:DescribeImages"
+    ]
+    resources = [aws_ecr_repository.app_runner.arn]
+  }
+}
+
+resource "aws_iam_role" "apprunner_ecr" {
+  count = var.use_managed_ecr ? 1 : 0
+  name  = "${local.name_prefix}-apprunner-ecr-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Service = "build.apprunner.amazonaws.com"
+      }
+      Action = "sts:AssumeRole"
+    }]
+  })
+
+  tags = merge(local.tags, {
+    Name = "${local.name_prefix}-apprunner-ecr-role"
+  })
+}
+
+resource "aws_iam_role_policy" "apprunner_ecr" {
+  count  = var.use_managed_ecr ? 1 : 0
+  name   = "${local.name_prefix}-apprunner-ecr-policy"
+  role   = aws_iam_role.apprunner_ecr[0].id
+  policy = data.aws_iam_policy_document.apprunner_ecr_access[0].json
+}
+
 resource "aws_apprunner_vpc_connector" "this" {
   vpc_connector_name = "${local.name_prefix}-connector"
   subnets            = [aws_subnet.private_primary.id, aws_subnet.private_secondary.id]
@@ -337,14 +403,21 @@ resource "aws_apprunner_vpc_connector" "this" {
 }
 
 resource "aws_apprunner_service" "this" {
-  service_name     = var.app_runner_service_name
+  service_name = var.app_runner_service_name
 
   source_configuration {
     auto_deployments_enabled = false
 
+    dynamic "authentication_configuration" {
+      for_each = local.use_managed_ecr ? [local.app_runner_auth_role_arn] : []
+      content {
+        access_role_arn = authentication_configuration.value
+      }
+    }
+
     image_repository {
-      image_identifier      = var.app_runner_image_identifier
-      image_repository_type = var.app_runner_image_repository_type
+      image_identifier      = local.app_runner_image_identifier
+      image_repository_type = local.app_runner_image_repository_type
 
       image_configuration {
         port = var.app_runner_port

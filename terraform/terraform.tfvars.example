@@ -15,6 +15,12 @@ db_username = "appuser"
 ssm_instance_type = "t3.micro"
 # ssm_ami_id = "ami-xxxxxxxx" # Uncomment to pin a specific AMI
 
+# App Runner image configuration
+use_managed_ecr               = false
+app_runner_image_identifier   = "public.ecr.aws/aws-containers/hello-app-runner:latest"
+app_runner_image_repository_type = "ECR_PUBLIC"
+app_runner_image_tag          = "latest"
+
 # App Runner secret environment variable name
 app_runner_secret_env_name = "DB_CREDENTIALS_SECRET_ARN"
 

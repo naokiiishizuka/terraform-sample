@@ -64,14 +64,20 @@ variable "app_runner_service_name" {
   default     = "sample-public-api"
 }
 
+variable "use_managed_ecr" {
+  description = "When true, deploy the App Runner service from the managed ECR repository instead of a public image"
+  type        = bool
+  default     = false
+}
+
 variable "app_runner_image_identifier" {
-  description = "Image identifier for the App Runner service"
+  description = "Image identifier for the App Runner service when not using the managed ECR repository"
   type        = string
   default     = "public.ecr.aws/aws-containers/hello-app-runner:latest"
 }
 
 variable "app_runner_image_repository_type" {
-  description = "Repository type for the App Runner image (ECR or ECR_PUBLIC)"
+  description = "Repository type for the App Runner image when not using the managed ECR repository"
   type        = string
   default     = "ECR_PUBLIC"
 }
@@ -80,6 +86,12 @@ variable "app_runner_port" {
   description = "Port exposed by the application image"
   type        = number
   default     = 8000
+}
+
+variable "app_runner_image_tag" {
+  description = "Container image tag to deploy from the managed ECR repository"
+  type        = string
+  default     = "latest"
 }
 
 variable "app_runner_secret_env_name" {
