@@ -20,7 +20,7 @@ output "app_runner_service_url" {
 
 output "app_runner_secret_arn" {
   description = "Secrets Manager ARN referenced by App Runner"
-  value       = aws_secretsmanager_secret.app_runner_db_credentials.arn
+  value       = local.db_master_secret_arn
 }
 
 output "kms_key_arn" {

@@ -60,3 +60,19 @@
   - 参照する Secret ARN
   - 利用する KMS Key ARN
 
+---
+
+## Terraform 適用手順（0 から構築する場合）
+
+1. **認証情報の準備**  
+   Terraform から操作する AWS アカウントのクレデンシャルを AWS CLI または環境変数で設定し、`aws sts get-caller-identity` などで確認します。
+2. **変数ファイルの用意**  
+   `terraform/terraform.tfvars.example` を `terraform/terraform.tfvars` にコピーし、`project_name` や `db_username`、タグなど環境に応じて更新します（DB パスワードは Secrets Manager により自動生成・管理されるため不要）。
+3. **初期化**  
+   `cd terraform` 後に `terraform init` を実行してプロバイダをダウンロードします。
+4. **差分確認**  
+   `terraform plan` を実行して作成されるリソースを確認します。RDS のマスターシークレットは apply 中に自動作成され、App Runner などの依存リソースも同一 run で問題ありません。
+5. **適用**  
+   `terraform apply` を実行し、内容を確認して `yes` を入力します。完了後は `terraform output` で VPC ID や App Runner URL、Secrets Manager ARN などを取得できます。
+6. **動作確認**  
+   App Runner 経由でアプリと DB が疎通できること、SSM EC2 に Session Manager で接続できることなどを確認し、必要に応じて Terraform state をバックアップします。

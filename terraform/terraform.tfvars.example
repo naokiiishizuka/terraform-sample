@@ -8,9 +8,8 @@ project_name = "terraform-sample"
 #   secondary = "10.0.20.0/24"
 # }
 
-# Database credentials (do not commit secrets)
+# Database username (password managed by Secrets Manager)
 db_username = "appuser"
-db_password = "change-me"
 
 # Session Manager helper EC2
 ssm_instance_type = "t3.micro"

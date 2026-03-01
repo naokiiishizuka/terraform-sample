@@ -40,12 +40,6 @@ variable "db_username" {
   default     = "appuser"
 }
 
-variable "db_password" {
-  description = "Master password for the PostgreSQL instance"
-  type        = string
-  sensitive   = true
-}
-
 variable "db_allocated_storage" {
   description = "Allocated storage (in GB) for the PostgreSQL instance"
   type        = number
@@ -61,7 +55,7 @@ variable "db_instance_class" {
 variable "db_engine_version" {
   description = "Engine version for the PostgreSQL instance"
   type        = string
-  default     = "13.11"
+  default     = "18.3"
 }
 
 variable "app_runner_service_name" {

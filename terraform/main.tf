@@ -161,7 +161,8 @@ resource "aws_db_instance" "postgres" {
   instance_class          = var.db_instance_class
   db_name                 = var.db_name
   username                = var.db_username
-  password                = var.db_password
+  manage_master_user_password = true
+  master_user_secret_kms_key_id = aws_kms_key.secrets.arn
   port                    = 5432
   vpc_security_group_ids  = [aws_security_group.rds.id]
   db_subnet_group_name    = aws_db_subnet_group.rds.name
@@ -174,6 +175,10 @@ resource "aws_db_instance" "postgres" {
   tags = merge(local.tags, {
     Name = "${local.name_prefix}-postgres"
   })
+}
+
+locals {
+  db_master_secret_arn = aws_db_instance.postgres.master_user_secret[0].secret_arn
 }
 
 resource "aws_iam_role" "ssm_instance" {
@@ -277,17 +282,6 @@ resource "aws_kms_alias" "secrets" {
   target_key_id = aws_kms_key.secrets.id
 }
 
-resource "aws_secretsmanager_secret" "app_runner_db_credentials" {
-  name                    = "${local.name_prefix}/app-runner/db-credentials"
-  description             = "Credentials for App Runner to reach PostgreSQL"
-  kms_key_id              = aws_kms_key.secrets.arn
-  recovery_window_in_days = 7
-
-  tags = merge(local.tags, {
-    Name = "${local.name_prefix}-apprunner-secret"
-  })
-}
-
 data "aws_iam_policy_document" "apprunner_assume" {
   statement {
     effect  = "Allow"
@@ -307,7 +301,7 @@ data "aws_iam_policy_document" "apprunner_secrets" {
       "secretsmanager:GetSecretValue",
       "secretsmanager:DescribeSecret"
     ]
-    resources = [aws_secretsmanager_secret.app_runner_db_credentials.arn]
+    resources = [local.db_master_secret_arn]
   }
 
   statement {
@@ -344,23 +338,25 @@ resource "aws_apprunner_vpc_connector" "this" {
 
 resource "aws_apprunner_service" "this" {
   service_name     = var.app_runner_service_name
-  service_role_arn = aws_iam_role.apprunner_service.arn
 
   source_configuration {
+    auto_deployments_enabled = false
+
     image_repository {
       image_identifier      = var.app_runner_image_identifier
       image_repository_type = var.app_runner_image_repository_type
 
       image_configuration {
         port = var.app_runner_port
+        runtime_environment_secrets = {
+          (var.app_runner_secret_env_name) = local.db_master_secret_arn
+        }
       }
     }
   }
 
   instance_configuration {
-    runtime_environment_secrets = {
-      (var.app_runner_secret_env_name) = aws_secretsmanager_secret.app_runner_db_credentials.arn
-    }
+    instance_role_arn = aws_iam_role.apprunner_service.arn
   }
 
   network_configuration {
