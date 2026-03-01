@@ -76,3 +76,43 @@
    `terraform apply` を実行し、内容を確認して `yes` を入力します。完了後は `terraform output` で VPC ID や App Runner URL、Secrets Manager ARN などを取得できます。
 6. **動作確認**  
    App Runner 経由でアプリと DB が疎通できること、SSM EC2 に Session Manager で接続できることなどを確認し、必要に応じて Terraform state をバックアップします。
+
+---
+
+## SSM 経由で RDS に接続する手順
+
+1. **Session Manager プラグインの準備**  
+   ローカル端末で AWS CLI v2 および Session Manager Plugin をインストールし、`aws configure` で対象アカウント／リージョン (ap-northeast-1) に接続できるようにします。
+
+2. **Secrets Manager から DB 資格情報を取得**  
+   `terraform output app_runner_secret_arn` などで RDS が管理するシークレット ARN を確認し、以下で最新パスワードを取得します。  
+   ```bash
+   aws secretsmanager get-secret-value \
+     --secret-id <シークレットARN> \
+     --region ap-northeast-1 \
+     --query SecretString --output text
+   ```
+   取得した JSON の `password` を `PGPASSWORD` として控えておきます。
+
+3. **ポートフォワーディングを開始**  
+   Session Manager で RDS へのトンネルを張ります (別ターミナルで実行すると便利です)。  
+   ```bash
+   aws ssm start-session \
+     --target <SSM作業EC2のインスタンスID> \
+     --document-name AWS-StartPortForwardingSessionToRemoteHost \
+     --parameters '{
+       "host":["<RDSエンドポイント>"],
+       "portNumber":["5432"],
+       "localPortNumber":["5432"]
+     }' \
+     --region ap-northeast-1
+   ```
+   `Port 5432 opened ... Waiting for connections...` が表示されたままの状態で次へ進みます。
+
+4. **`psql` で接続**  
+   別ターミナルを開き、取得したパスワードと `sslmode=require` を使って接続します。  
+   ```bash
+   export PGPASSWORD=<Step2で取得したpassword>
+   psql "host=localhost port=5432 dbname=appdb user=appuser sslmode=require"
+   ```
+   接続が完了したら通常通り SQL を実行できます。終了後は `Ctrl+C` で Session Manager のポートフォワーディングを停止します。
