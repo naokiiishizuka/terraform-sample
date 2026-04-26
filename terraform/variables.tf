@@ -17,7 +17,7 @@ variable "vpc_cidr_block" {
 }
 
 variable "private_subnet_cidrs" {
-  description = "CIDR blocks for the two private subnets (one per AZ)"
+  description = "CIDR blocks for the two private subnets (ECS tasks and RDS)"
   type = object({
     primary   = string
     secondary = string
@@ -25,6 +25,18 @@ variable "private_subnet_cidrs" {
   default = {
     primary   = "10.0.1.0/24"
     secondary = "10.0.2.0/24"
+  }
+}
+
+variable "public_subnet_cidrs" {
+  description = "CIDR blocks for the two public subnets (ALB)"
+  type = object({
+    primary   = string
+    secondary = string
+  })
+  default = {
+    primary   = "10.0.10.0/24"
+    secondary = "10.0.11.0/24"
   }
 }
 
@@ -58,44 +70,50 @@ variable "db_engine_version" {
   default     = "18.3"
 }
 
-variable "app_runner_service_name" {
-  description = "Name for the App Runner service"
+variable "ecs_service_name" {
+  description = "Name for the ECS service"
   type        = string
   default     = "sample-public-api"
 }
 
-variable "use_managed_ecr" {
-  description = "When true, deploy the App Runner service from the managed ECR repository instead of a public image"
-  type        = bool
-  default     = false
-}
-
-variable "app_runner_image_identifier" {
-  description = "Image identifier for the App Runner service when not using the managed ECR repository"
+variable "ecs_image_identifier" {
+  description = "Full image URI for the ECS task. Defaults to the managed ECR repository with ecs_image_tag."
   type        = string
-  default     = "public.ecr.aws/aws-containers/hello-app-runner:latest"
+  default     = null
 }
 
-variable "app_runner_image_repository_type" {
-  description = "Repository type for the App Runner image when not using the managed ECR repository"
-  type        = string
-  default     = "ECR_PUBLIC"
-}
-
-variable "app_runner_port" {
-  description = "Port exposed by the application image"
-  type        = number
-  default     = 8000
-}
-
-variable "app_runner_image_tag" {
-  description = "Container image tag to deploy from the managed ECR repository"
+variable "ecs_image_tag" {
+  description = "Container image tag to deploy from the ECR repository (used when ecs_image_identifier is null)"
   type        = string
   default     = "latest"
 }
 
-variable "app_runner_secret_env_name" {
-  description = "Environment variable name exposed to the App Runner runtime for the Secrets Manager ARN"
+variable "ecs_container_port" {
+  description = "Port exposed by the application container"
+  type        = number
+  default     = 8000
+}
+
+variable "ecs_cpu" {
+  description = "CPU units for the ECS task (256, 512, 1024, 2048, 4096)"
+  type        = number
+  default     = 256
+}
+
+variable "ecs_memory" {
+  description = "Memory (MiB) for the ECS task"
+  type        = number
+  default     = 512
+}
+
+variable "ecs_desired_count" {
+  description = "Desired number of ECS task instances"
+  type        = number
+  default     = 2
+}
+
+variable "ecs_secret_env_name" {
+  description = "Environment variable name injected into the container for the Secrets Manager ARN"
   type        = string
   default     = "DB_CREDENTIALS_SECRET_ARN"
 }

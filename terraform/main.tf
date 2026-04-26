@@ -20,7 +20,30 @@ locals {
   ssm_ami_id = coalesce(var.ssm_ami_id, data.aws_ssm_parameter.al2023_ami.value)
 }
 
-resource "aws_ecr_repository" "app_runner" {
+# ---------------------------------------------------------------------------
+# KMS
+# ---------------------------------------------------------------------------
+
+resource "aws_kms_key" "secrets" {
+  description             = "KMS key for Secrets Manager secrets (${local.name_prefix})"
+  deletion_window_in_days = 7
+  enable_key_rotation     = true
+
+  tags = merge(local.tags, {
+    Name = "${local.name_prefix}-secrets-kms"
+  })
+}
+
+resource "aws_kms_alias" "secrets" {
+  name          = "alias/${local.name_prefix}-secrets"
+  target_key_id = aws_kms_key.secrets.id
+}
+
+# ---------------------------------------------------------------------------
+# ECR
+# ---------------------------------------------------------------------------
+
+resource "aws_ecr_repository" "app" {
   name                 = "${local.name_prefix}-app"
   image_tag_mutability = "MUTABLE"
 
@@ -38,6 +61,10 @@ resource "aws_ecr_repository" "app_runner" {
   })
 }
 
+# ---------------------------------------------------------------------------
+# VPC
+# ---------------------------------------------------------------------------
+
 resource "aws_vpc" "main" {
   cidr_block           = var.vpc_cidr_block
   enable_dns_support   = true
@@ -47,6 +74,8 @@ resource "aws_vpc" "main" {
     Name = "${local.name_prefix}-vpc"
   })
 }
+
+# --- Private subnets (ECS tasks, RDS) ---
 
 resource "aws_subnet" "private_primary" {
   vpc_id                  = aws_vpc.main.id
@@ -70,10 +99,98 @@ resource "aws_subnet" "private_secondary" {
   })
 }
 
-resource "aws_security_group" "app_runner" {
-  name        = "${local.name_prefix}-apprunner-sg"
-  description = "Security group used by the App Runner VPC connector"
+# --- Public subnets (ALB) ---
+
+resource "aws_subnet" "public_primary" {
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = var.public_subnet_cidrs.primary
+  availability_zone       = local.primary_az
+  map_public_ip_on_launch = false
+
+  tags = merge(local.tags, {
+    Name = "${local.name_prefix}-public-a"
+  })
+}
+
+resource "aws_subnet" "public_secondary" {
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = var.public_subnet_cidrs.secondary
+  availability_zone       = local.secondary_az
+  map_public_ip_on_launch = false
+
+  tags = merge(local.tags, {
+    Name = "${local.name_prefix}-public-c"
+  })
+}
+
+# --- Internet Gateway ---
+
+resource "aws_internet_gateway" "main" {
+  vpc_id = aws_vpc.main.id
+
+  tags = merge(local.tags, {
+    Name = "${local.name_prefix}-igw"
+  })
+}
+
+# --- Route tables ---
+
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.main.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.main.id
+  }
+
+  tags = merge(local.tags, {
+    Name = "${local.name_prefix}-public-rt"
+  })
+}
+
+resource "aws_route_table_association" "public_primary" {
+  subnet_id      = aws_subnet.public_primary.id
+  route_table_id = aws_route_table.public.id
+}
+
+resource "aws_route_table_association" "public_secondary" {
+  subnet_id      = aws_subnet.public_secondary.id
+  route_table_id = aws_route_table.public.id
+}
+
+resource "aws_route_table" "private" {
+  vpc_id = aws_vpc.main.id
+
+  tags = merge(local.tags, {
+    Name = "${local.name_prefix}-private-rt"
+  })
+}
+
+resource "aws_route_table_association" "private_primary" {
+  subnet_id      = aws_subnet.private_primary.id
+  route_table_id = aws_route_table.private.id
+}
+
+resource "aws_route_table_association" "private_secondary" {
+  subnet_id      = aws_subnet.private_secondary.id
+  route_table_id = aws_route_table.private.id
+}
+
+# ---------------------------------------------------------------------------
+# Security groups
+# ---------------------------------------------------------------------------
+
+resource "aws_security_group" "alb" {
+  name        = "${local.name_prefix}-alb-sg"
+  description = "Allow HTTP from the internet to the ALB"
   vpc_id      = aws_vpc.main.id
+
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
 
   egress {
     from_port   = 0
@@ -83,7 +200,32 @@ resource "aws_security_group" "app_runner" {
   }
 
   tags = merge(local.tags, {
-    Name = "${local.name_prefix}-apprunner-sg"
+    Name = "${local.name_prefix}-alb-sg"
+  })
+}
+
+resource "aws_security_group" "ecs_tasks" {
+  name        = "${local.name_prefix}-ecs-tasks-sg"
+  description = "Allow inbound from ALB to ECS tasks"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    from_port       = var.ecs_container_port
+    to_port         = var.ecs_container_port
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb.id]
+    description     = "ALB to ECS task"
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = merge(local.tags, {
+    Name = "${local.name_prefix}-ecs-tasks-sg"
   })
 }
 
@@ -131,15 +273,15 @@ resource "aws_security_group" "vpc_endpoints" {
 
 resource "aws_security_group" "rds" {
   name        = "${local.name_prefix}-rds-sg"
-  description = "Allow PostgreSQL only from App Runner and SSM host"
+  description = "Allow PostgreSQL only from ECS tasks and SSM host"
   vpc_id      = aws_vpc.main.id
 
   ingress {
     from_port       = 5432
     to_port         = 5432
     protocol        = "tcp"
-    security_groups = [aws_security_group.app_runner.id]
-    description     = "App Runner access on 5432"
+    security_groups = [aws_security_group.ecs_tasks.id]
+    description     = "ECS tasks access on 5432"
   }
 
   ingress {
@@ -161,6 +303,10 @@ resource "aws_security_group" "rds" {
     Name = "${local.name_prefix}-rds-sg"
   })
 }
+
+# ---------------------------------------------------------------------------
+# RDS
+# ---------------------------------------------------------------------------
 
 resource "aws_db_subnet_group" "rds" {
   name       = "${local.name_prefix}-rds-subnets"
@@ -196,13 +342,13 @@ resource "aws_db_instance" "postgres" {
 }
 
 locals {
-  db_master_secret_arn             = aws_db_instance.postgres.master_user_secret[0].secret_arn
-  use_managed_ecr                  = var.use_managed_ecr
-  managed_ecr_image_identifier     = "${aws_ecr_repository.app_runner.repository_url}:${var.app_runner_image_tag}"
-  app_runner_image_identifier      = local.use_managed_ecr ? local.managed_ecr_image_identifier : var.app_runner_image_identifier
-  app_runner_image_repository_type = local.use_managed_ecr ? "ECR" : var.app_runner_image_repository_type
-  app_runner_auth_role_arn         = local.use_managed_ecr ? aws_iam_role.apprunner_ecr[0].arn : null
+  db_master_secret_arn = aws_db_instance.postgres.master_user_secret[0].secret_arn
+  ecs_image_identifier = coalesce(var.ecs_image_identifier, "${aws_ecr_repository.app.repository_url}:${var.ecs_image_tag}")
 }
+
+# ---------------------------------------------------------------------------
+# SSM EC2 (DB access helper)
+# ---------------------------------------------------------------------------
 
 resource "aws_iam_role" "ssm_instance" {
   name = "${local.name_prefix}-ssm-ec2-role"
@@ -251,6 +397,11 @@ resource "aws_instance" "ssm_worker" {
   })
 }
 
+# ---------------------------------------------------------------------------
+# VPC Endpoints
+# ---------------------------------------------------------------------------
+
+# SSM (for EC2 Session Manager)
 resource "aws_vpc_endpoint" "ssm" {
   vpc_id              = aws_vpc.main.id
   service_name        = "com.amazonaws.${var.aws_region}.ssm"
@@ -290,160 +441,261 @@ resource "aws_vpc_endpoint" "ec2messages" {
   })
 }
 
-resource "aws_kms_key" "secrets" {
-  description             = "KMS key for Secrets Manager secrets (${local.name_prefix})"
-  deletion_window_in_days = 7
-  enable_key_rotation     = true
+# ECR (for ECS Fargate image pull from private subnets)
+resource "aws_vpc_endpoint" "ecr_api" {
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.${var.aws_region}.ecr.api"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = [aws_subnet.private_primary.id, aws_subnet.private_secondary.id]
+  security_group_ids  = [aws_security_group.vpc_endpoints.id]
+  private_dns_enabled = true
 
   tags = merge(local.tags, {
-    Name = "${local.name_prefix}-secrets-kms"
+    Name = "${local.name_prefix}-vpce-ecr-api"
   })
 }
 
-resource "aws_kms_alias" "secrets" {
-  name          = "alias/${local.name_prefix}-secrets"
-  target_key_id = aws_kms_key.secrets.id
-}
-
-data "aws_iam_policy_document" "apprunner_assume" {
-  statement {
-    effect  = "Allow"
-    actions = ["sts:AssumeRole"]
-
-    principals {
-      type        = "Service"
-      identifiers = ["build.apprunner.amazonaws.com", "tasks.apprunner.amazonaws.com"]
-    }
-  }
-}
-
-data "aws_iam_policy_document" "apprunner_secrets" {
-  statement {
-    effect = "Allow"
-    actions = [
-      "secretsmanager:GetSecretValue",
-      "secretsmanager:DescribeSecret"
-    ]
-    resources = [local.db_master_secret_arn]
-  }
-
-  statement {
-    effect    = "Allow"
-    actions   = ["kms:Decrypt"]
-    resources = [aws_kms_key.secrets.arn]
-  }
-}
-
-resource "aws_iam_role" "apprunner_service" {
-  name               = "${local.name_prefix}-apprunner-role"
-  assume_role_policy = data.aws_iam_policy_document.apprunner_assume.json
+resource "aws_vpc_endpoint" "ecr_dkr" {
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.${var.aws_region}.ecr.dkr"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = [aws_subnet.private_primary.id, aws_subnet.private_secondary.id]
+  security_group_ids  = [aws_security_group.vpc_endpoints.id]
+  private_dns_enabled = true
 
   tags = merge(local.tags, {
-    Name = "${local.name_prefix}-apprunner-role"
+    Name = "${local.name_prefix}-vpce-ecr-dkr"
   })
 }
 
-resource "aws_iam_role_policy" "apprunner_secrets" {
-  name   = "${local.name_prefix}-apprunner-secrets"
-  role   = aws_iam_role.apprunner_service.id
-  policy = data.aws_iam_policy_document.apprunner_secrets.json
+# S3 Gateway endpoint (for ECR layer pulls via S3)
+resource "aws_vpc_endpoint" "s3" {
+  vpc_id            = aws_vpc.main.id
+  service_name      = "com.amazonaws.${var.aws_region}.s3"
+  vpc_endpoint_type = "Gateway"
+  route_table_ids   = [aws_route_table.private.id]
+
+  tags = merge(local.tags, {
+    Name = "${local.name_prefix}-vpce-s3"
+  })
 }
 
-data "aws_iam_policy_document" "apprunner_ecr_access" {
-  count = var.use_managed_ecr ? 1 : 0
-  statement {
-    actions   = ["ecr:GetAuthorizationToken"]
-    resources = ["*"]
+# Secrets Manager (for ECS task secret injection)
+resource "aws_vpc_endpoint" "secretsmanager" {
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.${var.aws_region}.secretsmanager"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = [aws_subnet.private_primary.id, aws_subnet.private_secondary.id]
+  security_group_ids  = [aws_security_group.vpc_endpoints.id]
+  private_dns_enabled = true
+
+  tags = merge(local.tags, {
+    Name = "${local.name_prefix}-vpce-secretsmanager"
+  })
+}
+
+# CloudWatch Logs (for ECS task log delivery)
+resource "aws_vpc_endpoint" "logs" {
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.${var.aws_region}.logs"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = [aws_subnet.private_primary.id, aws_subnet.private_secondary.id]
+  security_group_ids  = [aws_security_group.vpc_endpoints.id]
+  private_dns_enabled = true
+
+  tags = merge(local.tags, {
+    Name = "${local.name_prefix}-vpce-logs"
+  })
+}
+
+# ---------------------------------------------------------------------------
+# ALB
+# ---------------------------------------------------------------------------
+
+resource "aws_lb" "main" {
+  name               = "${local.name_prefix}-alb"
+  internal           = false
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.alb.id]
+  subnets            = [aws_subnet.public_primary.id, aws_subnet.public_secondary.id]
+
+  tags = merge(local.tags, {
+    Name = "${local.name_prefix}-alb"
+  })
+}
+
+resource "aws_lb_target_group" "app" {
+  name        = "${local.name_prefix}-tg"
+  port        = var.ecs_container_port
+  protocol    = "HTTP"
+  vpc_id      = aws_vpc.main.id
+  target_type = "ip"
+
+  health_check {
+    path                = "/"
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+    interval            = 30
   }
 
-  statement {
-    actions = [
-      "ecr:BatchGetImage",
-      "ecr:GetDownloadUrlForLayer",
-      "ecr:DescribeImages"
-    ]
-    resources = [aws_ecr_repository.app_runner.arn]
+  tags = merge(local.tags, {
+    Name = "${local.name_prefix}-tg"
+  })
+}
+
+resource "aws_lb_listener" "http" {
+  load_balancer_arn = aws_lb.main.arn
+  port              = 80
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.app.arn
   }
 }
 
-resource "aws_iam_role" "apprunner_ecr" {
-  count = var.use_managed_ecr ? 1 : 0
-  name  = "${local.name_prefix}-apprunner-ecr-role"
+# ---------------------------------------------------------------------------
+# ECS
+# ---------------------------------------------------------------------------
+
+resource "aws_ecs_cluster" "main" {
+  name = "${local.name_prefix}-cluster"
+
+  tags = merge(local.tags, {
+    Name = "${local.name_prefix}-cluster"
+  })
+}
+
+resource "aws_cloudwatch_log_group" "ecs" {
+  name              = "/ecs/${local.name_prefix}"
+  retention_in_days = 30
+
+  tags = local.tags
+}
+
+# IAM: Task Execution Role (ECR pull + Secrets Manager + CloudWatch Logs)
+resource "aws_iam_role" "ecs_task_execution" {
+  name = "${local.name_prefix}-ecs-exec-role"
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
       Effect = "Allow"
       Principal = {
-        Service = "build.apprunner.amazonaws.com"
+        Service = "ecs-tasks.amazonaws.com"
       }
       Action = "sts:AssumeRole"
     }]
   })
 
   tags = merge(local.tags, {
-    Name = "${local.name_prefix}-apprunner-ecr-role"
+    Name = "${local.name_prefix}-ecs-exec-role"
   })
 }
 
-resource "aws_iam_role_policy" "apprunner_ecr" {
-  count  = var.use_managed_ecr ? 1 : 0
-  name   = "${local.name_prefix}-apprunner-ecr-policy"
-  role   = aws_iam_role.apprunner_ecr[0].id
-  policy = data.aws_iam_policy_document.apprunner_ecr_access[0].json
+resource "aws_iam_role_policy_attachment" "ecs_task_execution_managed" {
+  role       = aws_iam_role.ecs_task_execution.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
-resource "aws_apprunner_vpc_connector" "this" {
-  vpc_connector_name = "${local.name_prefix}-connector"
-  subnets            = [aws_subnet.private_primary.id, aws_subnet.private_secondary.id]
-  security_groups    = [aws_security_group.app_runner.id]
+resource "aws_iam_role_policy" "ecs_task_execution_secrets" {
+  name = "${local.name_prefix}-ecs-exec-secrets"
+  role = aws_iam_role.ecs_task_execution.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:DescribeSecret"
+        ]
+        Resource = [local.db_master_secret_arn]
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["kms:Decrypt"]
+        Resource = [aws_kms_key.secrets.arn]
+      }
+    ]
+  })
+}
+
+# IAM: Task Role (application-level permissions)
+resource "aws_iam_role" "ecs_task" {
+  name = "${local.name_prefix}-ecs-task-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Service = "ecs-tasks.amazonaws.com"
+      }
+      Action = "sts:AssumeRole"
+    }]
+  })
 
   tags = merge(local.tags, {
-    Name = "${local.name_prefix}-apprunner-connector"
+    Name = "${local.name_prefix}-ecs-task-role"
   })
 }
 
-resource "aws_apprunner_service" "this" {
-  service_name = var.app_runner_service_name
+resource "aws_ecs_task_definition" "app" {
+  family                   = "${local.name_prefix}-app"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = var.ecs_cpu
+  memory                   = var.ecs_memory
+  execution_role_arn       = aws_iam_role.ecs_task_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
 
-  source_configuration {
-    auto_deployments_enabled = false
-
-    dynamic "authentication_configuration" {
-      for_each = local.use_managed_ecr ? [local.app_runner_auth_role_arn] : []
-      content {
-        access_role_arn = authentication_configuration.value
+  container_definitions = jsonencode([{
+    name  = "app"
+    image = local.ecs_image_identifier
+    portMappings = [{
+      containerPort = var.ecs_container_port
+      protocol      = "tcp"
+    }]
+    secrets = [{
+      name      = var.ecs_secret_env_name
+      valueFrom = local.db_master_secret_arn
+    }]
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.ecs.name
+        "awslogs-region"        = var.aws_region
+        "awslogs-stream-prefix" = "ecs"
       }
     }
+  }])
 
-    image_repository {
-      image_identifier      = local.app_runner_image_identifier
-      image_repository_type = local.app_runner_image_repository_type
+  tags = merge(local.tags, {
+    Name = "${local.name_prefix}-task-def"
+  })
+}
 
-      image_configuration {
-        port = var.app_runner_port
-        runtime_environment_secrets = {
-          (var.app_runner_secret_env_name) = local.db_master_secret_arn
-        }
-      }
-    }
-  }
-
-  instance_configuration {
-    instance_role_arn = aws_iam_role.apprunner_service.arn
-  }
+resource "aws_ecs_service" "app" {
+  name            = var.ecs_service_name
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.app.arn
+  desired_count   = var.ecs_desired_count
+  launch_type     = "FARGATE"
 
   network_configuration {
-    egress_configuration {
-      egress_type       = "VPC"
-      vpc_connector_arn = aws_apprunner_vpc_connector.this.arn
-    }
-
-    ingress_configuration {
-      is_publicly_accessible = true
-    }
+    subnets          = [aws_subnet.private_primary.id, aws_subnet.private_secondary.id]
+    security_groups  = [aws_security_group.ecs_tasks.id]
+    assign_public_ip = false
   }
 
+  load_balancer {
+    target_group_arn = aws_lb_target_group.app.arn
+    container_name   = "app"
+    container_port   = var.ecs_container_port
+  }
+
+  depends_on = [aws_lb_listener.http]
+
   tags = merge(local.tags, {
-    Name = "${local.name_prefix}-app-runner"
+    Name = "${local.name_prefix}-ecs-service"
   })
 }

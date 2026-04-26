@@ -1,11 +1,16 @@
 output "vpc_id" {
-  description = "ID of the VPC hosting the private subnets"
+  description = "ID of the VPC"
   value       = aws_vpc.main.id
 }
 
 output "private_subnet_ids" {
-  description = "IDs of the private subnets shared by RDS, App Runner connector, and the SSM host"
+  description = "IDs of the private subnets (ECS tasks and RDS)"
   value       = [aws_subnet.private_primary.id, aws_subnet.private_secondary.id]
+}
+
+output "public_subnet_ids" {
+  description = "IDs of the public subnets (ALB)"
+  value       = [aws_subnet.public_primary.id, aws_subnet.public_secondary.id]
 }
 
 output "rds_endpoint" {
@@ -13,19 +18,19 @@ output "rds_endpoint" {
   value       = aws_db_instance.postgres.address
 }
 
-output "app_runner_service_url" {
-  description = "Public URL where the App Runner service is exposed"
-  value       = aws_apprunner_service.this.service_url
+output "alb_dns_name" {
+  description = "Public DNS name of the Application Load Balancer"
+  value       = aws_lb.main.dns_name
 }
 
-output "app_runner_secret_arn" {
-  description = "Secrets Manager ARN referenced by App Runner"
+output "db_secret_arn" {
+  description = "Secrets Manager ARN for the RDS master user credentials"
   value       = local.db_master_secret_arn
 }
 
-output "app_runner_ecr_repository_url" {
-  description = "ECR repository URL hosting the App Runner container image"
-  value       = aws_ecr_repository.app_runner.repository_url
+output "ecr_repository_url" {
+  description = "ECR repository URL for the application container image"
+  value       = aws_ecr_repository.app.repository_url
 }
 
 output "kms_key_arn" {
@@ -41,4 +46,14 @@ output "ssm_ec2_instance_id" {
 output "ssm_ec2_private_ip" {
   description = "Private IP of the Session Manager helper EC2 instance"
   value       = aws_instance.ssm_worker.private_ip
+}
+
+output "ecs_cluster_name" {
+  description = "Name of the ECS cluster"
+  value       = aws_ecs_cluster.main.name
+}
+
+output "ecs_service_name" {
+  description = "Name of the ECS service"
+  value       = aws_ecs_service.app.name
 }
